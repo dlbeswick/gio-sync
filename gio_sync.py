@@ -35,6 +35,7 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument('src', type=str, help="Source of syncing operation")
 parser.add_argument('dst', type=str, help="Destination of syncing operation")
+parser.add_argument('--count', action='store_true')
 parser.add_argument('--dry-run',
                     action='store_true',
                     help="Just describe what is to be done, but don't make changes")
@@ -203,18 +204,18 @@ def diff_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
     if dst_diff_dirs.dirty_is():
       for missing in dst_diff_dirs.missing:
         def copy_recurse(src_dir):
-          dst_dir = file_at(dst, missing.info.get_name())
+          dst_dir = file_at(dst, src_dir.get_name())
           print(f"+/ {dst_dir.get_uri()}")
           dst_dir.make_directory()
 
           files, dirs = files_and_dirs_get(src_dir)
           for f in files:
-            copy_file(src_dir, dst_dir, False, dry_run)
+            copy_file(file_at(src_dir, f.get_name()), dst_dir, False, dry_run)
 
           for d in dirs:
             copy_recurse(d)
 
-        copy_recurse(file_at(src, missing.info.get_name()))
+        copy_recurse(missing.file(src))
 
       for extra in dst_diff_dirs.extra:
         delete_recurse(extra.file(dst), extra.info, dry_run)
