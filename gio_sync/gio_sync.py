@@ -54,8 +54,8 @@ parser = argparse.ArgumentParser(
   description=__doc__
 )
 
-parser.add_argument('src', type=str, help="Source of syncing operation. May point to a file or a directory.")
-parser.add_argument('dst', type=str, help="Destination directory of syncing operation.")
+parser.add_argument('src', type=str, help="GVFS URI of source of sync operation. May point to a file or a directory.")
+parser.add_argument('dst', type=str, help="GVFS URI of destination directory of syncing operation.")
 parser.add_argument('--dry-run',
                     action='store_true',
                     help="Just describe what would be done, but don't make changes")
