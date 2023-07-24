@@ -2,3 +2,4 @@
 /gio_sync.egg-info/
 *.pyc
 __pycache__
+/README.html
