@@ -62,5 +62,6 @@ jobs:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.pip }}
       run: |
+        ls -alR
         python3 -m pip install --upgrade twine
         python3 -m twine upload --repository ${{ inputs.pypi_repo }} *.whl
