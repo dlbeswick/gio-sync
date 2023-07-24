@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gio-sync"
+description = "Commandline tool making use of the Gnome Gio library and GVFS to sync file paths."
+version = "1.0"
+dependencies = [
+  "PyGObject"
+]
+authors = [
+  { name = "David Beswick", email = "dlbeswick@gmail.com" }
+]
+license = { text = "AGPL-3.0-or-later" }
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)"
+]
+requires-python = ">=3.7"
+
+[project.urls]
+Homepage = "https://github.com/dlbeswick/gio-sync"
+
+[project.scripts]
+gio-sync = "gio_sync:gio_sync.main"

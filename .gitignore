@@ -1,0 +1,4 @@
+/dist/
+/gio_sync.egg-info/
+*.pyc
+__pycache__

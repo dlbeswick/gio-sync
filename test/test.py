@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""
+gio-sync: Make use of the Gnome Gio library and GVFS to sync file paths.
+Copyright (C) 2023 David Beswick
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+"""
+
 import os
 import subprocess
 import tempfile
@@ -6,7 +24,7 @@ import unittest
 from pathlib import Path, PurePath
 
 def run(*args):
-  args_final = ["../gio_sync.py"] + list(args)
+  args_final = ["gio-sync"] + list(args)
   print("RUN ", args_final)
   result = subprocess.run(args_final, capture_output=True, universal_newlines=True)
   print("\n\nSTDOUT:\n" + result.stdout)
@@ -25,7 +43,8 @@ def make_test_files(src_dir, srcs, dst_dir, dsts):
     p.touch()
 
   return srcs, dsts
-  
+
+
 class Test(unittest.TestCase):
 
   def check_files(self, src_dir, srcs, dst_dir):
@@ -123,6 +142,7 @@ class Test(unittest.TestCase):
         srcs, _ = make_test_files(src, [], dst, ["delete.txt"])
 
         self.assertEqual(run(f"{src}/delete.txt", dst).returncode, 1)
+
         
 if __name__ == '__main__':
   unittest.main()
