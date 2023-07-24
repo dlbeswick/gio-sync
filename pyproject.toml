@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "gio-sync"
 description = "Commandline tool making use of the Gnome Gio library and GVFS to sync file paths."
 readme = "README.md"
-version = "1.0"
+version = "1.1"
 dependencies = [
   "PyGObject"
 ]

@@ -30,9 +30,11 @@ If you think this program could help you out in some way that it's not doing cur
 
 # Installation
 
-## Via PIP
+## From PIP
 
-Tbc...
+Run the following command:
+
+    pip install gio-sync
 
 ## From source
 
@@ -44,11 +46,11 @@ Tbc...
 
 1. Build the package:
 
-         python3 -m build
+        python3 -m build
 		 
 1. Install the package with dependencies: 
 
-          pip install dist/*.whl
+        pip install dist/*.whl
 
 # Running
 
@@ -70,13 +72,13 @@ Please run `gio-sync --help` for further information about additional commandlin
 
 [Gvfs makes use of libmtp](https://gitlab.gnome.org/GNOME/gvfs/-/blob/master/daemon/gvfsbackendmtp.c) for its MTP backend, just the same as projects like `jmtpfs`. In theory it should work just as well, but in practice these two projects could make use of `libmtp` in such different ways that Gvfs could well perform much better than other projects for some devices. This was my experience. At least the user can know that if Gnome Files works for their device, then this sync tool will also work.
 
-# Development notes
+# For developers
 
 You can run tests as follows:
 
     python3 test/test.py
 	
-The tests are system-level tests and they call the `gio-sync` command directly, so you may like to install the built package in a virtualenv to test any changes you're making during development.
+The tests are system-level tests and they call the `gio-sync` shell command entry point directly, so you may like to install the built package in a virtualenv to test any changes you're making during development.
 
 # Issues
 
