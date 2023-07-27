@@ -6,9 +6,8 @@ to the program's focus on MTP support and MTP's limitations around changing
 timestamps.
 
 This program is particularly intended to be useful in syncing across MTP
-devices, which can be handy when all other MTP syncing methods fail. Samsung
-Android phones are particularly problematic when it comes to MTP, but the GVFS
-MTP implementation seems to handle it well.
+devices. It can be handy when all other MTP syncing methods, such as using
+FUSE filesystems and rsync, don't work for the device.
 
 """
 

@@ -70,7 +70,7 @@ Please run `gio-sync --help` for further information about additional commandlin
 
 ## Is this really necessary?
 
-[Gvfs makes use of libmtp](https://gitlab.gnome.org/GNOME/gvfs/-/blob/master/daemon/gvfsbackendmtp.c) for its MTP backend, just the same as projects like `jmtpfs`. In theory it should work just as well, but in practice these two projects could make use of `libmtp` in such different ways that Gvfs could well perform much better than other projects for some devices. This was my experience. At least the user can know that if Gnome Files works for their device, then this sync tool will also work.
+[Gvfs makes use of libmtp](https://gitlab.gnome.org/GNOME/gvfs/-/blob/master/daemon/gvfsbackendmtp.c) for its MTP backend, just the same as projects like `jmtpfs`. In theory it should work just as well, but in practice these two projects could make use of `libmtp` in such different ways that Gvfs could well perform much better than other projects for some devices. This was my experience. At least the user can know that if Gnome Files works for their device, then this sync tool will also work. This tool worked for me even when using rsync across the Gvfs file system path in /var/run didn't work.
 
 # For developers
 
