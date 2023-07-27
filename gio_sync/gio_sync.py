@@ -33,6 +33,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # https://github.com/GNOME/glib/blob/main/gio/gio-tool-copy.c
 
 import argparse
+import logging
+import sys
 import time
 import urllib.parse
 
@@ -53,8 +55,12 @@ parser = argparse.ArgumentParser(
   description=__doc__
 )
 
-parser.add_argument('src', type=str, help="GVFS URI of source of sync operation. May point to a file or a directory.")
-parser.add_argument('dst', type=str, help="GVFS URI of destination directory of syncing operation.")
+parser.add_argument('src',
+                    type=str,
+                    help="GVfs URI of source of sync operation. May point to a file or a directory.")
+parser.add_argument('dst',
+                    type=str,
+                    help="GVfs URI of destination directory of sync operation.")
 parser.add_argument('--dry-run',
                     action='store_true',
                     help="Just describe what would be done, but don't make changes")
@@ -125,36 +131,42 @@ class Diff:
     return self.extra or self.missing or self.changed
 
   def describe(self):
-    print("Extra:")
-    print('\n'.join([f.info.get_name() for f in self.extra]))
-    print("Missing:")
-    print('\n'.join([f.info.get_name() for f in self.missing]))
-    print("Changed:")
-    print('\n'.join([f"{l.info.get_name()} (size {l.info.get_size()} vs. {r.info.get_size()})"
-                     for l, r in self.changed]))
-    print("Same:")
-    print('\n'.join([f"{l.info.get_name()} (size {str(l.info.get_size())})" for l, r in self.same]))
+    lf = '\n'
+    return f"""Extra:
+{lf.join([f.info.get_name() for f in self.extra])}
+Missing:
+{lf.join([f.info.get_name() for f in self.missing])}
+Changed:
+{lf.join([f"{l.info.get_name()} (size {l.info.get_size()} vs. {r.info.get_size()})"
+                     for l, r in self.changed])}
+Same:
+{lf.join([f"{l.info.get_name()} (size {str(l.info.get_size())})" for l, r in self.same])}
+    """
 
   def identical(self):
     return not self.dirty_is
 
  
 class ProgressData(TypedDict):
-  time_previous: float|None
+  time_previous: float
   time_start: float
+  progress_shown: bool
 
   
 def file_at(gfile: Gio.File, *paths: str):
   """Construct a new Gio.File having the base URI of 'gfile', and path segments given by 'paths'."""
   return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
 
-def files_and_dirs_get(gfile: Gio.File) -> tuple[list[Gio.FileInfo], list[Gio.FileInfo]]:
+def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File]) -> (
+    tuple[list[Gio.FileInfo], list[Gio.FileInfo]]
+):
   """Get a list of metadata of directories and files at the given path.
 
   If a path to a is given, rather than a path to a directory, then just that single file will be returned with
   an empty list of dirs.
   
   :params gfile: A path to a file or directory.
+  :params exclude: A list of paths that should be excluded from the results. Checked with Gio.File.equal.
   :return: A tuple of [directories, files]
   """
 
@@ -167,6 +179,11 @@ def files_and_dirs_get(gfile: Gio.File) -> tuple[list[Gio.FileInfo], list[Gio.Fi
   dirs: list[Gio.FileInfo] = []
   
   for f in gfile.enumerate_children(','.join(ATTRS), Gio.FileQueryInfoFlags.NONE):
+    child_file = file_at(gfile, f.get_name())
+    if any(child_file.equal(ex) for ex in exclude):
+      logging.info("Skipping file: %s", child_file.get_uri())
+      continue
+      
     if f.get_file_type() == G_FILE_TYPE_DIRECTORY:
       dirs.append(f)
     else:
@@ -181,12 +198,29 @@ def file_name_map(files: list[Gio.File]) -> FileNameToFileInfoComparable:
 def progress_file_copy_show(current_num_bytes, total_num_bytes, user_data: ProgressData):
   """Show the progress of copying a single file."""
   tv = time.time()
-  if tv - user_data.get('time_previous', tv) < 1: # type: ignore
+
+  # Print a progress message each second, and check current_num_bytes so that a final progress message can be
+  # printed when complete.
+  if current_num_bytes != total_num_bytes and tv - user_data['time_previous'] < 1:
     return
 
-  rate = current_num_bytes / max((tv - user_data['time_start']) / 1000, 1)
-  print("\r\033[K");
-  print("Transferred %s out of %s (%s/s)" % (current_num_bytes, total_num_bytes, rate))
+  user_data['progress_shown'] = True
+
+  rate = current_num_bytes / max(tv - user_data['time_start'], 1)
+
+  # VT100 control characters.
+  # https://vt100.net/docs/vt510-rm/chapter4.html
+  #
+  # \r = carriage return. Without linefeed, it moves the cursor to beginning of line.
+  # \033 = ESC, control code sequence indicator.
+  # [K = erase line (search Erase in Line in above docs.)
+  sys.stderr.write("\r\033[K")
+  sys.stderr.write(
+    "Transferred %dM out of %dM (%.2fM/s)" % (
+      current_num_bytes/1024/1024, total_num_bytes/1024/1024, rate/1024/1024
+    )
+  )
+  sys.stderr.flush()
 
   user_data['time_previous'] = tv
 
@@ -217,7 +251,7 @@ def delete_recurse(file: Gio.File, info: Gio.FileInfo, dry_run: bool):
       child_file = file_at(file, child_info.get_name())
       stack.append((child_file, child_info, children_get(child_file, child_info)))
     else:
-      print(f"{'X/' if info.get_file_type() == 2 else 'X'} {file.get_uri()}")
+      logging.info(f"{'X/' if info.get_file_type() == 2 else 'X'} {file.get_uri()}")
       if not dry_run:
         file.delete()
   
@@ -230,16 +264,29 @@ def copy_file_to_dir(src_file: Gio.File, dst_path: Gio.File, overwrite: bool, dr
   """
   dst_file = file_at(dst_path, src_file.get_basename())
   
-  print(f"{src_file.get_uri()} {'+>' if overwrite else '->'} {dst_file.get_uri()}")
+  logging.info(f"{src_file.get_uri()} {'+>' if overwrite else '->'} {dst_file.get_uri()}")
   
   if not dry_run:
+    data = {
+      'time_previous': time.time(),
+      'time_start': time.time(),
+      'progress_shown': False
+    }
+    
     src_file.copy(
       dst_file,
       Gio.FileCopyFlags.OVERWRITE if overwrite else Gio.FileCopyFlags.NONE,
       None,
       progress_file_copy_show,
-      { 'time_start': time.time() }
+      data
     )
+
+    # After one second, the program will begin to show file copy progress information.
+    # VT100 control codes are being used to repeatedly update the progress display on a single line.
+    # If this line has been shown, then a final linefeed must be output so that the rest of the text continues
+    # on a new line.
+    if data['progress_shown']:
+      sys.stderr.write('\n')
     
 def copy_dir_recurse(src_dir: Gio.File, dst: Gio.File, dry_run: bool):
   """Copies an entire directory and its subtree to the destination directory. The destination must not exist.
@@ -255,10 +302,10 @@ def copy_dir_recurse(src_dir: Gio.File, dst: Gio.File, dry_run: bool):
     src_dir, dst = stack.pop()
     
     dst_dir = file_at(dst, src_dir.get_basename())
-    print(f"+/ {dst_dir.get_uri()}")
+    logging.info(f"+/ {dst_dir.get_uri()}")
     dst_dir.make_directory()
 
-    files, dirs = files_and_dirs_get(src_dir)
+    files, dirs = files_and_dirs_get(src_dir, [])
     for f in files:
       copy_file_to_dir(file_at(src_dir, f.get_name()), dst_dir, False, dry_run)
 
@@ -266,7 +313,7 @@ def copy_dir_recurse(src_dir: Gio.File, dst: Gio.File, dry_run: bool):
             
 def progress_operation_show(num_dirs_remaining: int, num_files_done: int):
   """Print the known progress of the entire copy operation so far."""
-  print(f"Progress: {num_dirs_remaining} dirs remaining, synced {num_files_done} files")
+  logging.info(f"Progress: {num_dirs_remaining} dirs remaining, synced {num_files_done} files")
 
 def test_dir(path: Gio.File) -> tuple[bool, Gio.FileInfo]:
   """Return (is_dir, info) for the given path, where 'is_dir' is true if it's a directory.
@@ -283,7 +330,7 @@ def test_dir(path: Gio.File) -> tuple[bool, Gio.FileInfo]:
 
   return info.get_file_type() == G_FILE_TYPE_DIRECTORY, info
   
-def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
+def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool):
   """Syncronize 'src' and 'dst' so that the files at 'dst' match the files at 'src' in content.
 
   Files and directories present in 'src' but missing from 'dst' will be copied.
@@ -297,10 +344,14 @@ def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
   stack = [(src, dst)]
   done = 0
   progress_last = time.time()
+  dst_original = dst
 
   while stack:
     src, dst = stack.pop()
-    src_files, src_dirs = files_and_dirs_get(src)
+
+    # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
+    # recursion.
+    src_files, src_dirs = files_and_dirs_get(src, [dst_original])
 
     # 'src' may point to either a directory or a file.
     # When it comes time to copy any files, 'src_root' will be used to properly form the source filename in
@@ -309,7 +360,7 @@ def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
     src_copy_root = src if src_is_dir else src.get_parent()
     
     try:
-      dst_files, dst_dirs = files_and_dirs_get(dst)
+      dst_files, dst_dirs = files_and_dirs_get(dst, [])
     except GioSyncNotFound as e:
       dst_files = []
       dst_dirs = []
@@ -321,6 +372,10 @@ def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
     dst_diff_dirs = Diff(file_name_map(dst_dirs), file_name_map(src_dirs), True)
     if dst_diff_dirs.dirty_is():
       for missing in dst_diff_dirs.missing:
+        if src.equal(dst_original):
+          logging.info("Skipping path '%s' because it matches the destination path", src)
+          continue
+  
         copy_dir_recurse(missing.file(src), dst, dry_run)
 
       for extra in dst_diff_dirs.extra:
@@ -328,10 +383,8 @@ def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
 
     dst_diff = Diff(file_name_map(dst_files), file_name_map(src_files), False)
     if dst_diff.dirty_is():
-      if verbose:
-        print(f"Sync required at {dst.get_uri()}")
-        dst_diff.describe()
-        print()
+      logging.debug(f"Sync required at {dst.get_uri()}")
+      logging.debug(dst_diff.describe() + "\n")
 
       for missing in dst_diff.missing:
         copy_file_to_dir(missing.file(src_copy_root), dst, False, dry_run)
@@ -353,13 +406,26 @@ def sync_recurse(src: Gio.File, dst: Gio.File, verbose: bool, dry_run: bool):
 def main():
   args = parser.parse_args()
 
+  logging.basicConfig(
+    format='%(message)s',
+    level=logging.DEBUG if args.verbose else logging.INFO
+  )
+  
   src_path = Gio.File.new_for_commandline_arg(args.src)
   dst_path = Gio.File.new_for_commandline_arg(args.dst)
 
-  total = sync_recurse(src_path, dst_path, args.verbose, args.dry_run)
+  try:
+    info = dst_path.make_directory()
+  except GLib.GError as e:
+    if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
+      logging.debug("Destination directory exists, not creating")
+    else:
+      raise
+    
+  total = sync_recurse(src_path, dst_path, args.dry_run)
 
   progress_operation_show(0, total)
-  print("Done")
+  logging.info("Done")
   
 
 if __name__ == '__main__':

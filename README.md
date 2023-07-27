@@ -56,7 +56,7 @@ Run the following command:
 
 1. Make sure the various devices and file locations you're syncing between are mounted in GVfs; in other words, make sure you can see them in Gnome Files.
 1. Open the source and destination location windows. Press CTRL+L and look at the location bar at the top of the window to get the GVfs URI for each location. These URIs would start with `mtp://` or `sftp://`, for example. For regular file locations, just add `file://` in front of the path, i.e. `file:///home/my_username/Music`
-1. Supply the source and destination URIs to `gio-sync`. Make sure to use quotes around the paths if they contain spaces. Note that the destination path must always point to a directory, and will be created if needed.
+1. Supply the source and destination URIs to `gio-sync`. Make sure to use quotes around the paths if they contain spaces. Note that the destination path must always point to a directory, and that directory will be created if needed.
 
 ## Usage example
 
@@ -70,7 +70,9 @@ Please run `gio-sync --help` for further information about additional commandlin
 
 ## Is this really necessary?
 
-[Gvfs makes use of libmtp](https://gitlab.gnome.org/GNOME/gvfs/-/blob/master/daemon/gvfsbackendmtp.c) for its MTP backend, just the same as projects like `jmtpfs`. In theory it should work just as well, but in practice these two projects could make use of `libmtp` in such different ways that Gvfs could well perform much better than other projects for some devices. This was my experience. At least the user can know that if Gnome Files works for their device, then this sync tool will also work. This tool worked for me even when using rsync across the Gvfs file system path in /var/run didn't work.
+[Gvfs makes use of libmtp](https://gitlab.gnome.org/GNOME/gvfs/-/blob/master/daemon/gvfsbackendmtp.c) for its MTP backend, just the same as projects like `jmtpfs`. In theory it should work just as well, but in practice these two projects could make use of `libmtp` in such different ways that Gvfs could well perform much better than other projects for some devices. This was my experience. At least the user can know that if Gnome Files works for their device, then this sync tool will also work. This tool also worked for me even when using rsync across the Gvfs file system path in /var/run didn't work.
+
+Because it uses simple MTP operations directly via Gio, it can be much quicker to run than other tools that are written assuming a regular POSIX filesystem.
 
 # For developers
 

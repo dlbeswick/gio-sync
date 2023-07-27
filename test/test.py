@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path, PurePath
 
 def run(*args):
-  args_final = ["gio-sync"] + list(args)
+  args_final = ["gio-sync", "--verbose"] + list(args)
   print("RUN ", args_final)
   result = subprocess.run(args_final, capture_output=True, universal_newlines=True)
   print("\n\nSTDOUT:\n" + result.stdout)
@@ -71,15 +71,14 @@ class Test(unittest.TestCase):
     
   def test_recurse(self):
     with tempfile.TemporaryDirectory() as src:
-      with tempfile.TemporaryDirectory() as dst:
-        test_input_files = [
-          "0.txt",
-          "1/1.txt",
-          "1/2/2.txt",
-          "1/2/3/3.txt"
-        ]
-
-        self.run_and_check_files(src, test_input_files, dst, [])
+      test_input_files = [
+        "0.txt",
+        "1/1.txt",
+        "1/2/2.txt",
+        "1/2/3/3.txt"
+      ]
+      
+      self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [])
 
   def test_delete(self):
     with tempfile.TemporaryDirectory() as src:
@@ -123,8 +122,18 @@ class Test(unittest.TestCase):
         with open(Path(src, "1/2/3/3change.txt"), "w") as io:
           io.write("new data in the file")
 
+        # Will also test:
+        # * Infinite recursion due to output path being child of source path.
+        # * Creation of output directory when it doesn't exist.
         run(src, dst)
           
+        self.check_files(src, srcs, dst)
+
+        with open(Path(src, "1/2/3/3change.txt"), "w") as io:
+          io.write("new data in the file 2")
+
+        run(src, dst)
+        
         self.check_files(src, srcs, dst)
         
   def test_single_file(self):
@@ -142,7 +151,7 @@ class Test(unittest.TestCase):
         srcs, _ = make_test_files(src, [], dst, ["delete.txt"])
 
         self.assertEqual(run(f"{src}/delete.txt", dst).returncode, 1)
-
+    
         
 if __name__ == '__main__':
   unittest.main()
