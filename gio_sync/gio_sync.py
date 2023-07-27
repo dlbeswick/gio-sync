@@ -38,6 +38,7 @@ import sys
 import time
 import urllib.parse
 
+from collections import deque
 from typing import TypedDict, Dict
 
 import gi
@@ -50,46 +51,38 @@ from gi.repository import GLib # type: ignore
 # tbd:  G_FILE_TYPE_DIRECTORY; where is this constant in the gi repositoryLib?
 G_FILE_TYPE_DIRECTORY = 2
 
-parser = argparse.ArgumentParser(
-  formatter_class=argparse.RawDescriptionHelpFormatter,
-  description=__doc__
-)
-
-parser.add_argument('src',
-                    type=str,
-                    help="GVfs URI of source of sync operation. May point to a file or a directory.")
-parser.add_argument('dst',
-                    type=str,
-                    help="GVfs URI of destination directory of sync operation.")
-parser.add_argument('--dry-run',
-                    action='store_true',
-                    help="Just describe what would be done, but don't make changes")
-parser.add_argument('--verbose', action='store_true')
-
 ATTRS = [Gio.FILE_ATTRIBUTE_STANDARD_NAME,
          Gio.FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME,
          Gio.FILE_ATTRIBUTE_STANDARD_SIZE,
          Gio.FILE_ATTRIBUTE_STANDARD_TYPE]
+
+# A combination of the Gio File object with its associated metadata.
+FileEntry = tuple[Gio.File, Gio.FileInfo]
 
 
 class GioSyncNotFound(RuntimeError):
   pass
 
 
-class FileInfoComparable:
+class FileEntryComparable:
   """Wrapper class around Gio.FileInfo that allows comparison by filename, so it can be easily used in sets,
   etc."""
   
-  def __init__(self, info: Gio.FileInfo):
-    self.info = info
-    assert self.info.get_name(), "FileInfo not created with correct attribute request list"
+  def __init__(self, entry: FileEntry):
+    self.entry = entry
 
-  def file(self, parent: Gio.File) -> Gio.File:
+  @property
+  def info(self):
+    return self.entry[1]
+    
+  @property
+  def file(self):
+    return self.entry[0]
+  
+  def file_at(self, parent: Gio.File) -> Gio.File:
     """Return a Gio.File representing the file location as it would be when having the given parent.
-
-    I.e. parent.get_uri() + self.info.get_name()
     """
-    return file_at(parent, self.info.get_name())
+    return file_at(parent, self.entry[0].get_basename())
   
   def __eq__(self, rhs) -> bool:
     return self.info.get_name() == rhs.info.get_name()
@@ -97,16 +90,16 @@ class FileInfoComparable:
   def __hash__(self) -> int:
     return hash(self.info.get_name())
 
-FileNameToFileInfoComparable = Dict[str, FileInfoComparable]
+FileNameToFileEntryComparable = Dict[str, FileEntryComparable]
 
 
 class Diff:
   """Given two maps of file names to a list of Gio.FileInfo objects found at a particular path, creates a report
   detailing which files are missing, changed or added in the 'right' path as compared to 'left'."""
   
-  changed: set[tuple[FileInfoComparable, FileInfoComparable]]
+  changed: set[tuple[FileEntryComparable, FileEntryComparable]]
   
-  def __init__(self, left: FileNameToFileInfoComparable, right: FileNameToFileInfoComparable, is_dir: bool):
+  def __init__(self, left: FileNameToFileEntryComparable, right: FileNameToFileEntryComparable, is_dir: bool):
     def sorted_list(x):
       return list(sorted(x, key=lambda i: i.info.get_name()))
     
@@ -143,9 +136,6 @@ Same:
 {lf.join([f"{l.info.get_name()} (size {str(l.info.get_size())})" for l, r in self.same])}
     """
 
-  def identical(self):
-    return not self.dirty_is
-
  
 class ProgressData(TypedDict):
   time_previous: float
@@ -158,25 +148,25 @@ def file_at(gfile: Gio.File, *paths: str):
   return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
 
 def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File]) -> (
-    tuple[list[Gio.FileInfo], list[Gio.FileInfo]]
+    tuple[list[FileEntry], list[FileEntry]]
 ):
   """Get a list of metadata of directories and files at the given path.
 
-  If a path to a is given, rather than a path to a directory, then just that single file will be returned with
-  an empty list of dirs.
+  If a path to a file is given, rather than a path to a directory, then just that single file will be returned
+  with an empty list of dirs.
   
   :params gfile: A path to a file or directory.
   :params exclude: A list of paths that should be excluded from the results. Checked with Gio.File.equal.
-  :return: A tuple of [directories, files]
+  :return: A tuple of FileEntry objects with content [directories, files].
   """
 
   is_dir, gfile_info = test_dir(gfile)
 
   if not is_dir:
-    return ([gfile_info], [])
+    return ([(gfile, gfile_info)], [])
     
-  files: list[Gio.FileInfo] = []
-  dirs: list[Gio.FileInfo] = []
+  files: list[FileEntry] = []
+  dirs: list[FileEntry] = []
   
   for f in gfile.enumerate_children(','.join(ATTRS), Gio.FileQueryInfoFlags.NONE):
     child_file = file_at(gfile, f.get_name())
@@ -185,23 +175,27 @@ def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File]) -> (
       continue
       
     if f.get_file_type() == G_FILE_TYPE_DIRECTORY:
-      dirs.append(f)
+      dirs.append((child_file, f))
     else:
-      files.append(f)
+      files.append((child_file, f))
 
   return (files, dirs)
 
-def file_name_map(files: list[Gio.File]) -> FileNameToFileInfoComparable:
-  """Given a list of Gio.Files, returns a map of the files' names to the Gio.File objects."""
-  return { f.get_name(): FileInfoComparable(f) for f in files }
+def file_name_map(files: list[FileEntry]) -> FileNameToFileEntryComparable:
+  """Given a list of Gio.Files, returns a map of the files' names to the FileEntry objects."""
+  return { f[1].get_name(): FileEntryComparable(f) for f in files }
 
 def progress_file_copy_show(current_num_bytes, total_num_bytes, user_data: ProgressData):
   """Show the progress of copying a single file."""
   tv = time.time()
 
-  # Print a progress message each second, and check current_num_bytes so that a final progress message can be
-  # printed when complete.
-  if current_num_bytes != total_num_bytes and tv - user_data['time_previous'] < 1:
+  is_final_display = user_data['progress_shown'] and current_num_bytes == total_num_bytes
+  
+  # Print a progress message each second.
+  #
+  # If a progress message has ever been shown, then print a final progress message at the final iteration
+  # even if time hasn't passed.
+  if not is_final_display and tv - user_data['time_previous'] < 1:
     return
 
   user_data['progress_shown'] = True
@@ -288,29 +282,6 @@ def copy_file_to_dir(src_file: Gio.File, dst_path: Gio.File, overwrite: bool, dr
     if data['progress_shown']:
       sys.stderr.write('\n')
     
-def copy_dir_recurse(src_dir: Gio.File, dst: Gio.File, dry_run: bool):
-  """Copies an entire directory and its subtree to the destination directory. The destination must not exist.
-
-  Directories are created as required.
-  
-  :param src_dir: Must be a directory.
-  :param dst_dir: Must be a path to a non-existent directory.
-  """
-  stack = [(src_dir, dst)]
-
-  while stack:
-    src_dir, dst = stack.pop()
-    
-    dst_dir = file_at(dst, src_dir.get_basename())
-    logging.info(f"+/ {dst_dir.get_uri()}")
-    dst_dir.make_directory()
-
-    files, dirs = files_and_dirs_get(src_dir, [])
-    for f in files:
-      copy_file_to_dir(file_at(src_dir, f.get_name()), dst_dir, False, dry_run)
-
-    stack += [(file_at(src_dir, d.get_name()), dst_dir) for d in dirs]
-            
 def progress_operation_show(num_dirs_remaining: int, num_files_done: int):
   """Print the known progress of the entire copy operation so far."""
   logging.info(f"Progress: {num_dirs_remaining} dirs remaining, synced {num_files_done} files")
@@ -341,69 +312,95 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool):
   :return: The number of files, but not directories, checked during the operation.
   """
 
-  stack = [(src, dst)]
+  stack = deque([(src, dst)])
   done = 0
   progress_last = time.time()
   dst_original = dst
-
+  
   while stack:
     src, dst = stack.pop()
 
     # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
-    # recursion.
+    # recursion in case the dest directory is nested in the source.
     src_files, src_dirs = files_and_dirs_get(src, [dst_original])
 
-    # 'src' may point to either a directory or a file.
-    # When it comes time to copy any files, 'src_root' will be used to properly form the source filename in
-    # both of these cases. The filename of the source file to be copied will be appended to this root.
-    src_is_dir, _ = test_dir(src)
-    src_copy_root = src if src_is_dir else src.get_parent()
-    
     try:
       dst_files, dst_dirs = files_and_dirs_get(dst, [])
+      dst_exists = True
     except GioSyncNotFound as e:
       dst_files = []
       dst_dirs = []
 
-    if time.time() - progress_last > 1:
+      # Any destination directory not found will be created.
+      try:
+        logging.info(f"+/ {dst.get_uri()}")
+        dst.make_directory()
+      except GLib.GError as e:
+        if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
+          raise
+
+    if time.time() - progress_last >= 1:
       progress_operation_show(len(stack), done)
       progress_last = time.time()
     
-    dst_diff_dirs = Diff(file_name_map(dst_dirs), file_name_map(src_dirs), True)
-    if dst_diff_dirs.dirty_is():
-      for missing in dst_diff_dirs.missing:
-        if src.equal(dst_original):
-          logging.info("Skipping path '%s' because it matches the destination path", src)
-          continue
-  
-        copy_dir_recurse(missing.file(src), dst, dry_run)
+    src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True)
+    src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False)
 
-      for extra in dst_diff_dirs.extra:
-        delete_recurse(extra.file(dst), extra.info, dry_run)
-
-    dst_diff = Diff(file_name_map(dst_files), file_name_map(src_files), False)
-    if dst_diff.dirty_is():
+    if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
       logging.debug(f"Sync required at {dst.get_uri()}")
-      logging.debug(dst_diff.describe() + "\n")
+      
+    if src_diff_dirs.dirty_is():
+      logging.debug(src_diff_dirs.describe() + "\n")
+      for extra in src_diff_dirs.extra:
+        # A directory exists in 'src' that's not found in 'dst'.
+        #
+        # Place it on the top of the stack so it's processed first, before descending further into child
+        # directories.
+        stack.append((extra.file, extra.file_at(dst)))
+        
+      for missing in src_diff_dirs.missing:
+        delete_recurse(missing.file, missing.info, dry_run)
 
-      for missing in dst_diff.missing:
-        copy_file_to_dir(missing.file(src_copy_root), dst, False, dry_run)
+    if src_diff.dirty_is():
+      logging.debug(src_diff.describe() + "\n")
+      for extra in src_diff.extra:
+        copy_file_to_dir(extra.file, dst, False, dry_run)
 
-      for changed_dst, changed_src in dst_diff.changed:
-        copy_file_to_dir(changed_src.file(src_copy_root), dst, True, dry_run)
+      for changed_src, changed_dst in src_diff.changed:
+        copy_file_to_dir(changed_src.file, dst, True, dry_run)
 
-      for extra in dst_diff.extra:
-        dst_file = extra.file(dst)
-        delete_recurse(dst_file, extra.info, dry_run)
+      for missing in src_diff.missing:
+        delete_recurse(missing.file, extra.info, dry_run)
 
-    for sd, dd in reversed(dst_diff_dirs.same):
-      stack.append((sd.file(src), dd.file(dst)))
+    # For the directory being examined, any directories missing from 'dst' will be copied in the next iteration,
+    # and any extra directories not found in 'src' will have been deleted already.
+    #
+    # Now, add all the directories in common to the bottom of the stack, so that the above next iteration will
+    # be processing the missing directories only. Finally, these additional directories will be processed in
+    # alphabetical order because stack entries are popped off the top.
+    stack.extendleft((sd.file, dd.file) for sd, dd in src_diff_dirs.same)
 
     done += len(src_files)
   
   return done
 
 def main():
+  parser = argparse.ArgumentParser(
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    description=__doc__
+  )
+
+  parser.add_argument('src',
+                      type=str,
+                      help="GVfs URI of source of sync operation. May point to a file or a directory.")
+  parser.add_argument('dst',
+                      type=str,
+                      help="GVfs URI of destination directory of sync operation.")
+  parser.add_argument('--dry-run',
+                      action='store_true',
+                      help="Just describe what would be done, but don't make changes")
+  parser.add_argument('--verbose', action='store_true')
+
   args = parser.parse_args()
 
   logging.basicConfig(
@@ -414,14 +411,6 @@ def main():
   src_path = Gio.File.new_for_commandline_arg(args.src)
   dst_path = Gio.File.new_for_commandline_arg(args.dst)
 
-  try:
-    info = dst_path.make_directory()
-  except GLib.GError as e:
-    if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
-      logging.debug("Destination directory exists, not creating")
-    else:
-      raise
-    
   total = sync_recurse(src_path, dst_path, args.dry_run)
 
   progress_operation_show(0, total)
