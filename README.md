@@ -46,11 +46,11 @@ If you think this program could help you out in some way that it's not doing cur
 
 # Installation
 
-## From PIP
+## From Github
 
-Run the following command:
+Download the `.whl` file from the most recent release at the [Github Releases page](https://github.com/dlbeswick/gio-sync/issues). After this, install using PIP by running:
 
-    pip install gio-sync
+    pip install --upgrade <.whl file name>
 
 ## From source
 
