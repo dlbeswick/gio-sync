@@ -18,9 +18,11 @@ Some MTP devices record the file creation time, some don't. Some devices totally
 
 I don't believe any MTP device will allow setting of modification times on the MTP device, so there's no way to make sure that modification times match on the source and destination. This makes syncing by timestamp obviously difficult.
 
-If having a source modification timestamp greater than the time the file was last pushed to the device is sufficient to detect a change in your case, and if you're lucky enough to have a device that updates the timestamp when a file is pushed, and if the file is not otherwise modified on the device, then you shouldn't have too many problems making sure the latest version of a file makes it to your device. Otherwise, you might need to look at using the `--size-only` option.
+If having a source modification timestamp greater than the time the file was last pushed to the device is sufficient to detect a change in your case, and if you're lucky enough to have a device that updates the timestamp when a file is pushed, and if the file is not otherwise modified on the device, then you shouldn't have too many problems making sure the latest version of a file makes it to your device. 
 
-Copying from MTP to a proper filesystem is also usually problematic. For instance, having a text file on your phone that you update regularly. Many devices will never change the MTP timestamp as the file is changed. Again, `--size-only` will be the only option here.
+Copying from MTP to a proper filesystem is also usually problematic. For instance, having a text file on your phone that you update regularly. Many devices will never change the MTP timestamp as the file is changed. However, the size check should still catch many of these issues.
+
+For any other unusual cases, the `--size-only` option might help.
 
 ## You must mount everything yourself, first
 

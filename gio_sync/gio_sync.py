@@ -152,13 +152,21 @@ class Diff:
 
   def describe(self):
     lf = '\n'
+
+    def change_info(l, r):
+      infos = [f"size {l.info.get_size()} vs. {r.info.get_size()}"]
+
+      if l.info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_MODIFIED):
+        infos.append(f"time {GLib.DateTime.format_iso8601(l.info.get_modification_date_time())} vs {GLib.DateTime.format_iso8601(r.info.get_modification_date_time())}")
+
+      return ", ".join(infos)
+    
     return f"""Extra:
 {lf.join([f.info.get_name() for f in self.extra])}
 Missing:
 {lf.join([f.info.get_name() for f in self.missing])}
 Changed:
-{lf.join([f"{l.info.get_name()} (size {l.info.get_size()} vs. {r.info.get_size()})"
-                     for l, r in self.changed])}
+{lf.join([f"{l.info.get_name()} ({change_info(l, r)})" for l, r in self.changed])}
 Same:
 {lf.join([f"{l.info.get_name()} (size {str(l.info.get_size())})" for l, r in self.same])}
     """
@@ -357,7 +365,7 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
   progress_last = time.time()
   dst_original = dst
 
-  attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED}
+  attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED, Gio.FILE_ATTRIBUTE_TIME_MODIFIED_USEC}
   
   while stack:
     src, dst = stack.pop()

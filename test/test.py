@@ -63,6 +63,14 @@ class Test(unittest.TestCase):
           self.assertEqual(src_io.read(), dst_io.read(), f"File {dst} has content mismatch")
     print("All file content matches.")
     
+    for src, dst, _ in output_files:
+      # Note that Gio wasn't writing mod times with nanosecond precision for me, so just check up to
+      # microseconds.
+      self.assertLessEqual(
+        src.stat().st_mtime_ns//1000, dst.stat().st_mtime_ns//1000, f"File {dst} has unexpected mtime"
+      )
+    print("All file modification times are >= source.")
+    
   def run_and_check_files(self, src_dir, srcs, dst_dir, dsts):
     make_test_files(src_dir, srcs, dst_dir, dsts)
     run(src_dir, dst_dir)
@@ -129,12 +137,34 @@ class Test(unittest.TestCase):
           
         self.check_files(src, srcs, dst)
 
+        # Test size change without timestamp change
         with open(Path(src, "1/2/3/3change.txt"), "w") as io:
           io.write("new data in the file 2")
+
+        os.utime(Path(src, "1/2/3/3change.txt"), ns=(0, 0))
+        os.utime(Path(dst, "1/2/3/3change.txt"), ns=(0, 0))
+        run(src, dst)
+
+        self.check_files(src, srcs, dst)
+        
+        # Test mtime change detection
+        print("MTIME CHANGE")
+        os.utime(Path(src, "1/2/3/3change.txt"), ns=(0, 1000))
+        os.utime(Path(dst, "1/2/3/3change.txt"), ns=(0, 0))
 
         run(src, dst)
         
         self.check_files(src, srcs, dst)
+        
+        # Test --size-only
+        print("SIZE ONLY")
+        os.utime(Path(src, "1/2/3/3change.txt"), ns=(0, 1000))
+        os.utime(Path(dst, "1/2/3/3change.txt"), ns=(0, 0))
+
+        run('--size-only', src, dst)
+        
+        self.assertEqual(Path(dst, "1/2/3/3change.txt").stat().st_mtime_ns, 0,
+                         "Dest file should not have been copied as timestamp changes without size")
         
   def test_single_file(self):
     with tempfile.TemporaryDirectory() as src:
