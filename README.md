@@ -2,7 +2,7 @@
 
 This project uses the [Gio](https://docs.gtk.org/gio/) library and [GVfs](https://en.wikipedia.org/wiki/GVfs) to sync files between two locations.
 
-File access for MTP devices such as Android phones are notoriously fickle on Linux, and I wrote this program because Gnome's file system turned out to be the only way that I could sync files to and from a particular MTP device. The various MTP Fuse filesystems weren't working; only Gnome Files was. So, I wrote the program as a way to make use of Gnome's IO libraries to sync files using the commandline.
+File access for MTP devices such as Android phones are notoriously fickle on Linux, and I wrote this program because Gnome's file system turned out to be the only way that I could sync files to and from a particular MTP device. The various MTP Fuse filesystems weren't working; only Gnome Files was. This program is a way to make use of Gnome's IO libraries to sync files using the commandline.
 
 You might also be interested in looking at this project for an example of how to use PyGObject to access Glib and GTK functions from Python.
 
@@ -12,9 +12,15 @@ You might also be interested in looking at this project for an example of how to
 
 Although I use this on my own files, I also have good backups. All care has of course been taken during development, but please be careful with your important files! Consider running with the `--dry-run` parameter first to be sure that this program will do what you expect it to do.
 
-## Only file size is used to detect changed files
+## The --size-only option: MTP has poor support for modification times
 
-Any GVfs file path should work, but this project is geared towards supporting syncing involving MTP devices. MTP has a number of limitations that don't apply to Linux file systems, such as not having modification times and having only a limited set of file metadata. Because of this, the only way to detect file changes on MTP devices by metadata alone is to compare file sizes. If you think you'll have a lot of files that change their contents without changing their file sizes, then this program currently won't work well for you.
+Some MTP devices record the file creation time, some don't. Some devices totally re-write the file when a new version of the file is pushed to the device, some don't. Some will update the 'timestamp' on the MTP file when this happens, and others won't.
+
+I don't believe any MTP device will allow setting of modification times on the MTP device, so there's no way to make sure that modification times match on the source and destination. This makes syncing by timestamp obviously difficult.
+
+If having a source modification timestamp greater than the time the file was last pushed to the device is sufficient to detect a change in your case, and if you're lucky enough to have a device that updates the timestamp when a file is pushed, and if the file is not otherwise modified on the device, then you shouldn't have too many problems making sure the latest version of a file makes it to your device. Otherwise, you might need to look at using the `--size-only` option.
+
+Copying from MTP to a proper filesystem is also usually problematic. For instance, having a text file on your phone that you update regularly. Many devices will never change the MTP timestamp as the file is changed. Again, `--size-only` will be the only option here.
 
 ## You must mount everything yourself, first
 
@@ -23,6 +29,14 @@ This program won't mount any filesystems for you. Please make sure you can see y
 ## Only Linux is supported
 
 If you have Windows, you probably don't need this program anyway.
+
+## File attributes aren't synced
+
+This is because of the focus on MTP, and because of MTP's general lack of support for setting file attributes.
+
+## Symlinks
+
+Please see the program help for more information about symlink handling.
 
 ## If you need something, let me know
 
@@ -64,7 +78,7 @@ Run the following command:
 	
 # Further help
 
-Please run `gio-sync --help` for further information about additional commandline parameters.
+Please run `gio-sync --help` for further information and additional commandline parameters.
 
 # FAQ
 

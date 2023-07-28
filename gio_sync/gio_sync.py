@@ -5,15 +5,10 @@ This program is particularly intended to be useful in syncing across MTP
 devices. It can be handy when all other MTP syncing methods, such as using
 FUSE filesystems and rsync, don't work for the device.
 
-Please note the following:
- 
-* Only file size is used to determine if a file has changed. This is due
-  to the program's focus on MTP support and MTP's limitations around changing
-  timestamps.
+Please note that only regular files will be considered for transfers. If 'src'
+or 'dst' points to a symlink then those links will be followed, however, no
+symlinks will be followed in the child hierarchy.
 
-* Only regular files will be considered for transfers. If 'src'
-  or 'dst' points to a symlink then those links will be followed, however, no
-  symlinks will be followed in the child hierarchy.
 """
 
 """
@@ -32,6 +27,7 @@ GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 """
 
 # Examples of using the GIO library can be seen here:
@@ -53,10 +49,9 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio # type: ignore
 from gi.repository import GLib # type: ignore
 
-ATTRS = [Gio.FILE_ATTRIBUTE_STANDARD_NAME,
-         Gio.FILE_ATTRIBUTE_STANDARD_DISPLAY_NAME,
+ATTRS = {Gio.FILE_ATTRIBUTE_STANDARD_NAME,
          Gio.FILE_ATTRIBUTE_STANDARD_SIZE,
-         Gio.FILE_ATTRIBUTE_STANDARD_TYPE]
+         Gio.FILE_ATTRIBUTE_STANDARD_TYPE}
 
 # A combination of the Gio File object with its associated metadata.
 FileEntry = tuple[Gio.File, Gio.FileInfo]
@@ -97,13 +92,38 @@ FileNameToFileEntryComparable = Dict[str, FileEntryComparable]
 
 class Diff:
   """Given two maps of file names to a list of Gio.FileInfo objects found at a particular path, creates a report
-  detailing which files are missing, changed or added in the 'right' path as compared to 'left'."""
+  detailing which files are missing, changed or added in the 'right' path as compared to 'left'.
+
+  :param is_dir: True if the lists consist of only directories, or False if they consist of only files.
+  """
   
   changed: set[tuple[FileEntryComparable, FileEntryComparable]]
   
-  def __init__(self, left: FileNameToFileEntryComparable, right: FileNameToFileEntryComparable, is_dir: bool):
+  def __init__(self, left: FileNameToFileEntryComparable, right: FileNameToFileEntryComparable, is_dir: bool,
+               size_only: bool):
+    
     def sorted_list(x):
       return list(sorted(x, key=lambda i: i.info.get_name()))
+
+    def is_changed(l: FileEntryComparable, r: FileEntryComparable):
+      # Most filesystems don't record useful information in directory metadata about whether a change has
+      # happened to a file inside the directory.
+      if is_dir:
+        return False
+      
+      size_diff = l.info.get_size() != r.info.get_size()
+
+      if size_only:
+        time_diff = False
+      else:
+        time_l = l.info.get_modification_date_time()
+        time_r = r.info.get_modification_date_time()
+        assert(time_l)
+        assert(time_r)
+
+        time_diff = GLib.DateTime.compare(time_l, time_r) > 0
+        
+      return size_diff or time_diff
     
     leftfiles = set([f for f in left.values()])
     rightfiles = set([f for f in right.values()])
@@ -113,10 +133,15 @@ class Diff:
     
     self.missing = sorted_list(rightfiles.difference(leftfiles))
 
-    self.changed = \
-      set() if is_dir else \
-      {(l, right[l.info.get_name()]) for l in leftfiles
-       if not is_dir and l.info.get_size() != right.get(l.info.get_name(), l).info.get_size()}
+    self.changed = set()
+    
+    # Most filesystems don't record useful information in directory metadata about whether a change has
+    # happened to a file inside the directory.
+    if not is_dir:
+      for l in leftfiles:
+        r = right.get(l.info.get_name())
+        if r and is_changed(l, r):
+          self.changed.add((l, r))
 
     changed_left = { l[0] for l in self.changed }
     same_files_left = sorted_list(leftfiles.difference(extra.union(changed_left)))
@@ -152,7 +177,7 @@ def file_at(gfile: Gio.File, *paths: str):
   """Construct a new Gio.File having the base URI of 'gfile', and path segments given by 'paths'."""
   return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
 
-def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File]) -> (
+def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: set) -> (
     tuple[list[FileEntry], list[FileEntry]]
 ):
   """Get a list of metadata of directories and files at the given path.
@@ -165,15 +190,17 @@ def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File]) -> (
   :return: A tuple of FileEntry objects with content [directories, files].
   """
 
-  is_dir, gfile_info = test_dir(gfile)
+  attrs = ATTRS.union(attrs_extra)
+  
+  is_dir, gfile_info = test_dir(gfile, attrs)
 
   if not is_dir:
     return ([(gfile, gfile_info)], [])
     
   files: list[FileEntry] = []
   dirs: list[FileEntry] = []
-  
-  for f in gfile.enumerate_children(','.join(ATTRS), Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS):
+
+  for f in gfile.enumerate_children(','.join(attrs), Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS):
     child_file = file_at(gfile, f.get_name())
     if any(child_file.equal(ex) for ex in exclude):
       logging.info("Skipping file: %s", decode_uri(child_file.get_uri()))
@@ -299,13 +326,13 @@ def progress_operation_show(num_dirs_remaining: int, num_files_done: int):
   """Print the known progress of the entire copy operation so far."""
   logging.info(f"Progress: {num_dirs_remaining} dirs remaining, synced {num_files_done} files")
 
-def test_dir(path: Gio.File) -> tuple[bool, Gio.FileInfo]:
+def test_dir(path: Gio.File, attrs: set = ATTRS) -> tuple[bool, Gio.FileInfo]:
   """Return (is_dir, info) for the given path, where 'is_dir' is true if it's a directory.
   
   Raise GioSyncNotFound if the path is non-existent.
   """
   try:
-    info = path.query_info(','.join(ATTRS), Gio.FileQueryInfoFlags.NONE)
+    info = path.query_info(','.join(attrs), Gio.FileQueryInfoFlags.NONE)
   except GLib.GError as e:
     if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
       raise GioSyncNotFound("Path not found", path.get_uri())
@@ -314,7 +341,7 @@ def test_dir(path: Gio.File) -> tuple[bool, Gio.FileInfo]:
 
   return info.get_file_type() == Gio.FileType.DIRECTORY, info
   
-def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool):
+def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
   """Syncronize 'src' and 'dst' so that the files at 'dst' match the files at 'src' in content.
 
   Files and directories present in 'src' but missing from 'dst' will be copied.
@@ -329,16 +356,18 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool):
   done = 0
   progress_last = time.time()
   dst_original = dst
+
+  attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED}
   
   while stack:
     src, dst = stack.pop()
 
     # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
     # recursion in case the dest directory is nested in the source.
-    src_files, src_dirs = files_and_dirs_get(src, [dst_original])
+    src_files, src_dirs = files_and_dirs_get(src, [dst_original], attrs)
 
     try:
-      dst_files, dst_dirs = files_and_dirs_get(dst, [])
+      dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs)
       dst_exists = True
     except GioSyncNotFound as e:
       dst_files = []
@@ -356,8 +385,8 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool):
       progress_operation_show(len(stack), done)
       progress_last = time.time()
     
-    src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True)
-    src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False)
+    src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True, size_only)
+    src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False, size_only)
 
     if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
       logging.debug(f"Sync required at {decode_uri(dst.get_uri())}")
@@ -404,7 +433,7 @@ def list_recurse(path: Gio.File):
     path = stack.pop()
     
     try:
-      files, dirs = files_and_dirs_get(path, [])
+      files, dirs = files_and_dirs_get(path, [], set())
     except GioSyncNotFound:
       logging.warning("File disappeared: '%s'", decode_uri(path.get_uri()))
       continue
@@ -431,6 +460,10 @@ def main():
                       nargs='?',
                       help="GVfs URI of destination directory of sync operation. " +
                            "If not given, then list source files to stdout.")
+  parser.add_argument('--size-only',
+                      action='store_true',
+                      help="Only consider file size when detecting changes. Useful when copying from an MTP "+
+                           "source to a non-MTP destination.")
   parser.add_argument('--dry-run',
                       action='store_true',
                       help="Just describe what would be done, but don't make changes")
@@ -448,7 +481,7 @@ def main():
   if args.dst:
     dst_path = Gio.File.new_for_commandline_arg(args.dst)
 
-    total = sync_recurse(src_path, dst_path, args.dry_run)
+    total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only)
     
     progress_operation_show(0, total)
     logging.info("Done")
