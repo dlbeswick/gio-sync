@@ -4,3 +4,4 @@
 __pycache__
 /README.html
 *.emacs*
+/build/
