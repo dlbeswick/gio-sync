@@ -35,7 +35,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import argparse
 import logging
+import multiprocessing
 import sys
+import threading
 import time
 import urllib.parse
 
@@ -185,7 +187,7 @@ def file_at(gfile: Gio.File, *paths: str):
   """Construct a new Gio.File having the base URI of 'gfile', and path segments given by 'paths'."""
   return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
 
-def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: set) -> (
+def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs: set) -> (
     tuple[list[FileEntry], list[FileEntry]]
 ):
   """Get a list of metadata of directories and files at the given path.
@@ -198,8 +200,6 @@ def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: se
   :return: A tuple of FileEntry objects with content [directories, files].
   """
 
-  attrs = ATTRS.union(attrs_extra)
-  
   is_dir, gfile_info = test_dir(gfile, attrs)
 
   if not is_dir:
@@ -348,7 +348,124 @@ def test_dir(path: Gio.File, attrs: set = ATTRS) -> tuple[bool, Gio.FileInfo]:
       raise
 
   return info.get_file_type() == Gio.FileType.DIRECTORY, info
-  
+
+def sync_worker(src_uri: str, dst_uri: str, dst_original_uri: str, dry_run: bool, size_only: bool):
+
+  attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED, Gio.FILE_ATTRIBUTE_TIME_MODIFIED_USEC}
+  attrs = ATTRS.union(attrs)
+  dst_original = Gio.File.new_for_uri(dst_original_uri)
+  result = []
+
+  src = Gio.File.new_for_uri(src_uri)
+  dst = Gio.File.new_for_uri(dst_uri)
+
+  # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
+  # recursion in case the dest directory is nested in the source.
+  src_files, src_dirs = files_and_dirs_get(src, [dst_original], attrs)
+
+  try:
+    dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs)
+    dst_exists = True
+  except GioSyncNotFound as e:
+    dst_files = []
+    dst_dirs = []
+
+    # Any destination directory not found will be created.
+    try:
+      logging.info(f"+/ {decode_uri(dst.get_uri())}")
+      dst.make_directory()
+    except GLib.GError as e:
+      if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
+        raise
+
+  src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True, size_only)
+  src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False, size_only)
+
+  if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
+    logging.debug(f"Sync required at {decode_uri(dst.get_uri())}")
+
+  if src_diff_dirs.dirty_is():
+    logging.debug(src_diff_dirs.describe() + "\n")
+    for extra in src_diff_dirs.extra:
+      # A directory exists in 'src' that's not found in 'dst'.
+      #
+      # Place it on the top of the stack so it's processed first, before descending further into child
+      # directories.
+      result = [(extra.file.get_uri(), extra.file_at(dst).get_uri())] + result
+
+    for missing in src_diff_dirs.missing:
+      delete_recurse(missing.entry, dry_run)
+
+  if src_diff.dirty_is():
+    logging.debug(src_diff.describe() + "\n")
+    for extra in src_diff.extra:
+      copy_file_to_dir(extra.file, dst, False, dry_run)
+
+    for changed_src, changed_dst in src_diff.changed:
+      copy_file(changed_src.file, changed_dst.file, True, dry_run)
+
+    for missing in src_diff.missing:
+      delete_recurse(missing.entry, dry_run)
+
+  # For the directory being examined, any directories missing from 'dst' will be copied in the next iteration,
+  # and any extra directories not found in 'src' will have been deleted already.
+  #
+  # Now, add all the directories in common to the bottom of the stack, so that the above next iteration will
+  # be processing the missing directories only. Finally, these additional directories will be processed in
+  # alphabetical order because stack entries are popped off the top.
+  result.extend((sd.file.get_uri(), dd.file.get_uri()) for sd, dd in src_diff_dirs.same)
+
+  return result, len(src_files)
+
+def setup():#verbose):
+  logging.basicConfig(
+    format='%(message)s',
+    level=logging.DEBUG# if verbose else logging.INFO
+  )
+
+def run_tasks(tasks, func_launch, progress):
+  num_processes = 10
+
+  ctx = multiprocessing.get_context('forkserver')
+  pool = ctx.Pool(processes=num_processes, initializer=setup)
+  done = [0]
+  cnd = threading.Condition()
+  progress_last = time.time()
+
+  num_tasks_running = [0]
+
+  def on_task_done(result):
+    tasks_next, files_processed = result
+    done[0] += files_processed
+    with cnd:
+      tasks.extend(tasks_next)
+      num_tasks_running[0] -= 1
+      cnd.notify()
+
+  def on_error(e):
+    logging.error("Sync error: %s", e)
+    with cnd:
+      num_tasks_running[0] -= 1
+      cnd.notify()
+
+  with cnd:
+    while True:
+      while tasks:
+        func, args = func_launch(tasks.pop())
+        num_tasks_running[0] += 1
+        pool.apply_async(func, args, callback=on_task_done, error_callback=on_error)
+        
+      if not num_tasks_running[0]:
+        break
+      
+      cnd.wait(1)
+
+      if progress and time.time() - progress_last >= 1:
+        progress_operation_show(len(tasks) + num_tasks_running[0], done[0])
+        progress_last = time.time()
+
+  return done[0]
+
 def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
   """Syncronize 'src' and 'dst' so that the files at 'dst' match the files at 'src' in content.
 
@@ -360,99 +477,35 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
   :return: The number of files, but not directories, checked during the operation.
   """
 
-  stack = deque([(src, dst)])
-  done = 0
-  progress_last = time.time()
-  dst_original = dst
+  dst_original = dst.get_uri()
 
-  attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED, Gio.FILE_ATTRIBUTE_TIME_MODIFIED_USEC}
+  def task_get(task):
+    src_uri, dst_uri = task
+    return sync_worker, (src_uri, dst_uri, dst_original, dry_run, size_only)
   
-  while stack:
-    src, dst = stack.pop()
+  return run_tasks([(src.get_uri(), dst.get_uri())], task_get, True)
 
-    # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
-    # recursion in case the dest directory is nested in the source.
-    src_files, src_dirs = files_and_dirs_get(src, [dst_original], attrs)
-
-    try:
-      dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs)
-      dst_exists = True
-    except GioSyncNotFound as e:
-      dst_files = []
-      dst_dirs = []
-
-      # Any destination directory not found will be created.
-      try:
-        logging.info(f"+/ {decode_uri(dst.get_uri())}")
-        dst.make_directory()
-      except GLib.GError as e:
-        if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
-          raise
-
-    if time.time() - progress_last >= 1:
-      progress_operation_show(len(stack), done)
-      progress_last = time.time()
-    
-    src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True, size_only)
-    src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False, size_only)
-
-    if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
-      logging.debug(f"Sync required at {decode_uri(dst.get_uri())}")
-      
-    if src_diff_dirs.dirty_is():
-      logging.debug(src_diff_dirs.describe() + "\n")
-      for extra in src_diff_dirs.extra:
-        # A directory exists in 'src' that's not found in 'dst'.
-        #
-        # Place it on the top of the stack so it's processed first, before descending further into child
-        # directories.
-        stack.append((extra.file, extra.file_at(dst)))
-        
-      for missing in src_diff_dirs.missing:
-        delete_recurse(missing.entry, dry_run)
-
-    if src_diff.dirty_is():
-      logging.debug(src_diff.describe() + "\n")
-      for extra in src_diff.extra:
-        copy_file_to_dir(extra.file, dst, False, dry_run)
-
-      for changed_src, changed_dst in src_diff.changed:
-        copy_file(changed_src.file, changed_dst.file, True, dry_run)
-
-      for missing in src_diff.missing:
-        delete_recurse(missing.entry, dry_run)
-
-    # For the directory being examined, any directories missing from 'dst' will be copied in the next iteration,
-    # and any extra directories not found in 'src' will have been deleted already.
-    #
-    # Now, add all the directories in common to the bottom of the stack, so that the above next iteration will
-    # be processing the missing directories only. Finally, these additional directories will be processed in
-    # alphabetical order because stack entries are popped off the top.
-    stack.extendleft((sd.file, dd.file) for sd, dd in src_diff_dirs.same)
-
-    done += len(src_files)
+def list_worker(path_uri: str):
+  path = Gio.File.new_for_uri(path_uri)
   
-  return done
+  try:
+    print("LISTING", path_uri)
+    files, dirs = files_and_dirs_get(path, [], {Gio.FILE_ATTRIBUTE_STANDARD_NAME, Gio.FILE_ATTRIBUTE_STANDARD_TYPE})
+  except GioSyncNotFound:
+    logging.warning("File disappeared: '%s'", decode_uri(path.get_uri()))
+
+  for file, info in files:
+    print(decode_uri(file.get_uri()))
+
+  return list(reversed([(d.get_uri(),) for d, _ in dirs])), len(files)
 
 def list_recurse(path: Gio.File):
-  stack = [path]
-
-  while stack:
-    path = stack.pop()
-    
-    try:
-      files, dirs = files_and_dirs_get(path, [], set())
-    except GioSyncNotFound:
-      logging.warning("File disappeared: '%s'", decode_uri(path.get_uri()))
-      continue
-    except GLib.GError as e:
-      logging.warning("%s", e)
-      continue
-      
-    for file, info in files:
-      print(decode_uri(file.get_uri()))
-
-    stack.extend(reversed([d for d, _ in dirs]))
+  
+  def task_get(task):
+    path_uri = task
+    return list_worker, (path_uri)
+  
+  return run_tasks([(path.get_uri(),)], task_get, False)
 
 def main():
   parser = argparse.ArgumentParser(
