@@ -32,15 +32,21 @@ def run(*args):
   return result
 
 def make_test_files(src_dir, srcs, dst_dir, dsts):
+  def make_dir_or_file(base, path):
+    p = Path(base, f)
+    if '.' in p.name:
+      print("Make file", p)
+      p.parent.mkdir(parents=True, exist_ok=True)
+      p.touch()
+    else:
+      print("Make dir", p)
+      p.mkdir(parents=True, exist_ok=True)
+    
   for f in srcs:
-    p = Path(src_dir, f)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.touch()
+    make_dir_or_file(src_dir, f)
 
   for f in dsts:
-    p = Path(dst_dir, f)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.touch()
+    make_dir_or_file(dst_dir, f)
 
   return srcs, dsts
 
@@ -103,7 +109,9 @@ class Test(unittest.TestCase):
             "0.txt",
             "1/1.txt",
             "1/2/2.txt",
-            "1/2/3/3.txt"
+            "1/2/3/3.txt",
+            "2",
+            "3/4"
           ]
         )
         
