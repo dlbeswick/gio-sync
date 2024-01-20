@@ -188,8 +188,18 @@ class Test(unittest.TestCase):
       with tempfile.TemporaryDirectory() as dst:
         srcs, _ = make_test_files(src, [], dst, ["delete.txt"])
 
-        self.assertEqual(run(f"{src}/delete.txt", dst).returncode, 1)
+        result = run(f"{src}/delete.txt", dst)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(result.stdout, "No such file")
     
+  def test_case_insensitive_protected(self):
+    with tempfile.TemporaryDirectory() as src:
+      with tempfile.TemporaryDirectory() as dst:
+        srcs, _ = make_test_files(src, ["file0.txt", "File0.txt"], dst, ["file0.txt"])
+
+        result = run("--case-insensitive-protect", src, dst)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(result.stdout, "differ only by case")
         
 if __name__ == '__main__':
   unittest.main()

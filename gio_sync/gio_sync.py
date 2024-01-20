@@ -185,7 +185,7 @@ def file_at(gfile: Gio.File, *paths: str):
   """Construct a new Gio.File having the base URI of 'gfile', and path segments given by 'paths'."""
   return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
 
-def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: set) -> (
+def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: set, case_insensitive_protect: bool) -> (
     tuple[list[FileEntry], list[FileEntry]]
 ):
   """Get a list of metadata of directories and files at the given path.
@@ -195,6 +195,7 @@ def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: se
   
   :params gfile: A path to a file or directory.
   :params exclude: A list of paths that should be excluded from the results. Checked with Gio.File.equal.
+  :params case_insensitive_protect: Throws an error if two files having different cases are found.
   :return: A tuple of FileEntry objects with content [directories, files].
   """
 
@@ -219,6 +220,28 @@ def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: se
     elif f.get_file_type() == Gio.FileType.REGULAR:
       files.append((child_file, f))
 
+  if case_insensitive_protect:
+    fileset = {}
+    
+    for f, _ in files:
+      lower = f.get_basename().lower()
+      if lower in fileset:
+        fileset[lower].append(f)
+      else:
+        fileset[lower] = [f]
+
+    dupes = []
+    
+    for k, v in fileset.items():
+      if len(v) > 1:
+        dupes.extend(v)
+        
+    if dupes:
+      raise RuntimeError(
+        "Some files differ only by case. This will cause problems in the destination!\n\n" +
+        "Problem files: \n\n" + '\n'.join(f.get_uri() for f in dupes)
+      )
+      
   return (files, dirs)
 
 def file_name_map(files: list[FileEntry]) -> FileNameToFileEntryComparable:
@@ -349,7 +372,7 @@ def test_dir(path: Gio.File, attrs: set = ATTRS) -> tuple[bool, Gio.FileInfo]:
 
   return info.get_file_type() == Gio.FileType.DIRECTORY, info
   
-def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
+def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, case_insensitive_protect: bool):
   """Syncronize 'src' and 'dst' so that the files at 'dst' match the files at 'src' in content.
 
   Files and directories present in 'src' but missing from 'dst' will be copied.
@@ -372,10 +395,10 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
 
     # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
     # recursion in case the dest directory is nested in the source.
-    src_files, src_dirs = files_and_dirs_get(src, [dst_original], attrs)
+    src_files, src_dirs = files_and_dirs_get(src, [dst_original], attrs, case_insensitive_protect)
 
     try:
-      dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs)
+      dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs, case_insensitive_protect)
       dst_exists = True
     except GioSyncNotFound as e:
       dst_files = []
@@ -384,7 +407,8 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool):
       # Any destination directory not found will be created.
       try:
         logging.info(f"+/ {decode_uri(dst.get_uri())}")
-        dst.make_directory()
+        if not dry_run:
+          dst.make_directory()
       except GLib.GError as e:
         if not e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.EXISTS):
           raise
@@ -441,7 +465,7 @@ def list_recurse(path: Gio.File):
     path = stack.pop()
     
     try:
-      files, dirs = files_and_dirs_get(path, [], set())
+      files, dirs = files_and_dirs_get(path, [], set(), case_insensitive_protect)
     except GioSyncNotFound:
       logging.warning("File disappeared: '%s'", decode_uri(path.get_uri()))
       continue
@@ -470,11 +494,22 @@ def main():
                            "If not given, then list source files to stdout.")
   parser.add_argument('--size-only',
                       action='store_true',
-                      help="Only consider file size when detecting changes. Useful when copying from an MTP "+
+                      help="Only consider file size when detecting changes. Useful when copying from an MTP " +
                            "source to a non-MTP destination.")
   parser.add_argument('--dry-run',
                       action='store_true',
                       help="Just describe what would be done, but don't make changes")
+  parser.add_argument('--case-insensitive-protect',
+                      action='store_const',
+                      const=True,
+                      help="If one filesystem is case insensitive and the other is not, errors can occur during " +
+                           "file operations. This option will cause an error to be raised if a potential problem " +
+                           "is found. MTP is protected by default.")
+  parser.add_argument('--no-case-insensitive-protect',
+                      action='store_const',
+                      const=True,
+                      help="Ignores errors that can occur when trying to create two files having different cases " +
+                           "on case insensitive file systems.")
   parser.add_argument('--verbose', action='store_true')
 
   args = parser.parse_args()
@@ -486,10 +521,24 @@ def main():
   
   src_path = Gio.File.new_for_commandline_arg(args.src)
 
+  case_insensitive_schemes = ['mtp']
+  
   if args.dst:
     dst_path = Gio.File.new_for_commandline_arg(args.dst)
 
-    total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only)
+    case_insensitive_protect = \
+      not args.no_case_insensitive_protect \
+      and (
+        (
+          src_path.get_uri_scheme() not in case_insensitive_schemes
+          and dst_path.get_uri_scheme() in case_insensitive_schemes
+        )
+        or args.case_insensitive_protect
+      )
+
+    logging.info("Case insensitive protection is " + ("on" if case_insensitive_protect else "off"))
+    
+    total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only, case_insensitive_protect)
     
     progress_operation_show(0, total)
     logging.info("Done")
