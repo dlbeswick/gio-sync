@@ -465,7 +465,7 @@ def list_recurse(path: Gio.File):
     path = stack.pop()
     
     try:
-      files, dirs = files_and_dirs_get(path, [], set(), case_insensitive_protect)
+      files, dirs = files_and_dirs_get(path, [], set(), False)
     except GioSyncNotFound:
       logging.warning("File disappeared: '%s'", decode_uri(path.get_uri()))
       continue
@@ -536,7 +536,7 @@ def main():
         or args.case_insensitive_protect
       )
 
-    logging.info("Case insensitive protection is " + ("on" if case_insensitive_protect else "off"))
+    logging.info("Case insensitivity protection is %s", "on" if case_insensitive_protect else "off")
     
     total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only, case_insensitive_protect)
     
