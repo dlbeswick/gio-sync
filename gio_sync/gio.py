@@ -8,7 +8,7 @@ import logging
 import urllib.parse
 
 # A combination of the Gio File object with its associated metadata.
-type FileEntry = tuple[Gio.File, Gio.FileInfo]
+FileEntry = tuple[Gio.File, Gio.FileInfo]
 
 DEFAULT_FILE_ATTRIBUTES = {Gio.FILE_ATTRIBUTE_STANDARD_NAME,
                            Gio.FILE_ATTRIBUTE_STANDARD_SIZE,

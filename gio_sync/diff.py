@@ -36,7 +36,7 @@ class FileEntryComparable:
     return hash(self.info.get_name())
 
   
-type FileNameToFileEntryComparable = dict[str, FileEntryComparable]
+FileNameToFileEntryComparable = dict[str, FileEntryComparable]
 
 def comparable_file_name_map(files: list[FileEntry]) -> FileNameToFileEntryComparable:
   """Given a list of Gio.Files, returns a map of the files' names to the FileEntry objects."""
