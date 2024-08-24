@@ -1,7 +1,6 @@
-# 2023-07-28
+# 2024-08-24
 ## v1.1
-* Some changes 1
-* Some changes 2
+* Added ignore, ignore-file and gitignore options.
 
 # 2023-07-27
 ## v1.0
