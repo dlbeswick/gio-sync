@@ -228,6 +228,19 @@ class Test(unittest.TestCase):
       
       self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [], ["0.txt"], '--ignore', 'ignore*', 'exclude*')
 
+  def test_ignore_file(self):
+    with tempfile.TemporaryDirectory() as src:
+      test_input_files = [
+        (".gitignore", "/ignore*\n*exclude*"),
+        "0.txt",
+        "ignore_1.txt",
+        "ignore_2.txt",
+        "exclude_3.txt",
+      ]
+      
+      self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [], ["0.txt", ".gitignore"],
+                               '--ignore-file', os.path.join(src, ".gitignore"))
+      
   def test_gitignore(self):
     with tempfile.TemporaryDirectory() as src:
       test_input_files = [

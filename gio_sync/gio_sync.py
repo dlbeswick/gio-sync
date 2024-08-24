@@ -254,10 +254,10 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
 
     if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
       logging.debug("Sync required at %s", decode_uri(dst.get_uri()))
+      logging.debug("Active exclusions:\n  %s", '\n  '.join(m.description for m in exclude_final_src))
 
     if src_diff_dirs.dirty_is() or src_diff_dirs.excluded_is:
       logging.debug("Diff report for %s", decode_uri(dst.get_uri()))
-      logging.debug("Active exclusions:\n  %s", '\n  '.join(m.description for m in exclude_final_src))
       logging.debug(src_diff_dirs.describe() + "\n")
 
     if src_diff_dirs.dirty_is():
