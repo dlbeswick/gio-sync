@@ -32,12 +32,24 @@ def run(*args):
   return result
 
 def make_test_files(src_dir, srcs, dst_dir, dsts):
-  def make_dir_or_file(base, path):
+  def make_dir_or_file(base, path_or_tuple):
+    match path_or_tuple:
+      case (path, contents):
+        f = path
+        contents_to_write = contents
+      case single_path:
+        f = single_path
+        contents_to_write = None
+    
     p = Path(base, f)
     if '.' in p.name:
       print("Make file", p)
       p.parent.mkdir(parents=True, exist_ok=True)
-      p.touch()
+      if contents_to_write:
+        print("  Contents:\n  @ ", '\n  @ '.join(contents_to_write.split()))
+        p.write_text(contents_to_write)
+      else:
+        p.touch()
     else:
       print("Make dir", p)
       p.mkdir(parents=True, exist_ok=True)
@@ -53,14 +65,18 @@ def make_test_files(src_dir, srcs, dst_dir, dsts):
 
 class Test(unittest.TestCase):
 
-  def check_files(self, src_dir, srcs, dst_dir):
+  def check_files(self, src_dir, srcs, dst_dir, expected=None):
+
+    if expected == None:
+      expected = srcs
+    
     output_files = []
     for dir, dirs, files in os.walk(dst_dir):
       for file in files:
         relative = PurePath(dir, file).relative_to(dst_dir).as_posix()
         output_files.append((Path(src_dir, relative), Path(dst_dir, relative), relative))
 
-    self.assertEqual(set(srcs), {r for src, dst, r in output_files})
+    self.assertEqual(set(expected), {r for src, dst, r in output_files})
     print("All expected files are present.")
 
     for src, dst, _ in output_files:
@@ -77,10 +93,10 @@ class Test(unittest.TestCase):
       )
     print("All file modification times are >= source.")
     
-  def run_and_check_files(self, src_dir, srcs, dst_dir, dsts):
+  def run_and_check_files(self, src_dir, srcs, dst_dir, dsts, expected_dsts=None, *postargs):
     make_test_files(src_dir, srcs, dst_dir, dsts)
-    run(src_dir, dst_dir)
-    self.check_files(src_dir, srcs, dst_dir)
+    run(src_dir, dst_dir, *postargs)
+    self.check_files(src_dir, srcs, dst_dir, expected_dsts)
 
     
   def test_recurse(self):
@@ -200,6 +216,54 @@ class Test(unittest.TestCase):
         result = run("--case-insensitive-protect", src, dst)
         self.assertEqual(result.returncode, 1)
         self.assertIn(result.stdout, "differ only by case")
-        
+
+  def test_ignore(self):
+    with tempfile.TemporaryDirectory() as src:
+      test_input_files = [
+        "0.txt",
+        "ignore_1.txt",
+        "ignore_2.txt",
+        "exclude_3.txt",
+      ]
+      
+      self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [], ["0.txt"], '--ignore', 'ignore*', 'exclude*')
+
+  def test_gitignore(self):
+    with tempfile.TemporaryDirectory() as src:
+      test_input_files = [
+        (".gitignore", "/ignore*\n*exclude*"),
+        "0.txt",
+        "ignore_1.txt",
+        "ignore_2.txt",
+        "please_exclude_me.txt",
+        "ignore_this_directory/ignored_child.txt",
+      ]
+      
+      self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [], ["0.txt", ".gitignore"],
+                               '--gitignore')
+
+  def test_recursive_gitignore(self):
+    with tempfile.TemporaryDirectory() as src:
+      test_input_files = [
+        (".gitignore", "ignore*\n/*rootignore*"),
+        "0.txt",
+        "ignore_1.txt",
+        "rootignore_2.txt",
+        "don't_exclude_me.txt",
+        ("child_with_gitignore/.gitignore", "exclude*"),
+        "child_with_gitignore/exclude_me.txt",
+        "child_with_gitignore/ignore_me.txt",
+        "child_with_gitignore/child2/exclude_me_also.txt",
+        "child_with_gitignore/child2/do_not_rootignore_me_i'm_not_root.txt"
+      ]
+      
+      self.run_and_check_files(src, test_input_files, os.path.join(src, "out"), [],
+                               ["0.txt",
+                                ".gitignore",
+                                "don't_exclude_me.txt",
+                                "child_with_gitignore/.gitignore",
+                                "child_with_gitignore/child2/do_not_rootignore_me_i'm_not_root.txt"],
+                               '--gitignore')
+      
 if __name__ == '__main__':
   unittest.main()

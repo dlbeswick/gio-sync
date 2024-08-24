@@ -9,6 +9,12 @@ Please note that only regular files will be considered for transfers. If 'src'
 or 'dst' points to a symlink then those links will be followed, however, no
 symlinks will be followed in the child hierarchy.
 
+
+NOTE ON IGNORING FILES
+
+Ignored files that are already synced are left alone and not deleted from
+destination.
+
 """
 
 """
@@ -30,18 +36,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 """
 
-# Examples of using the GIO library can be seen here:
-# https://github.com/GNOME/glib/blob/main/gio/gio-tool-copy.c
+from .gio import decode_uri, file_at, files_and_dirs_get, FileEntry, GioSyncNotFound
+from .diff import Diff
+from .matcher import Matcher, MatcherGitignore
+from .matcher_finder import MatcherFinder, MatcherFinderGitignore
 
 import argparse
 import logging
 import sys
 import time
-import urllib.parse
 
 from collections import deque
-from typing import TypedDict, Dict
+from typing import TypedDict
 
+# Examples of using the GIO library can be seen here:
+# https://github.com/GNOME/glib/blob/main/gio/gio-tool-copy.c
 import gi
 
 gi.require_version("Gio", "2.0")
@@ -49,205 +58,13 @@ gi.require_version("GLib", "2.0")
 from gi.repository import Gio # type: ignore
 from gi.repository import GLib # type: ignore
 
-ATTRS = {Gio.FILE_ATTRIBUTE_STANDARD_NAME,
-         Gio.FILE_ATTRIBUTE_STANDARD_SIZE,
-         Gio.FILE_ATTRIBUTE_STANDARD_TYPE}
 
-# A combination of the Gio File object with its associated metadata.
-FileEntry = tuple[Gio.File, Gio.FileInfo]
-
-
-class GioSyncNotFound(RuntimeError):
-  pass
-
-
-class FileEntryComparable:
-  """Wrapper class around Gio.FileInfo that allows comparison by filename, so it can be easily used in sets,
-  etc."""
-  
-  def __init__(self, entry: FileEntry):
-    self.entry = entry
-
-  @property
-  def info(self):
-    return self.entry[1]
-    
-  @property
-  def file(self):
-    return self.entry[0]
-  
-  def file_at(self, parent: Gio.File) -> Gio.File:
-    """Return a Gio.File representing the file location as it would be when having the given parent.
-    """
-    return file_at(parent, self.entry[0].get_basename())
-  
-  def __eq__(self, rhs) -> bool:
-    return self.info.get_name() == rhs.info.get_name()
-  
-  def __hash__(self) -> int:
-    return hash(self.info.get_name())
-
-FileNameToFileEntryComparable = Dict[str, FileEntryComparable]
-
-
-class Diff:
-  """Given two maps of file names to a list of Gio.FileInfo objects found at a particular path, creates a report
-  detailing which files are missing, changed or added in the 'right' path as compared to 'left'.
-
-  :param is_dir: True if the lists consist of only directories, or False if they consist of only files.
-  """
-  
-  changed: set[tuple[FileEntryComparable, FileEntryComparable]]
-  
-  def __init__(self, left: FileNameToFileEntryComparable, right: FileNameToFileEntryComparable, is_dir: bool,
-               size_only: bool):
-    
-    def sorted_list(x):
-      return list(sorted(x, key=lambda i: i.info.get_name()))
-
-    def is_changed(l: FileEntryComparable, r: FileEntryComparable):
-      # Most filesystems don't record useful information in directory metadata about whether a change has
-      # happened to a file inside the directory.
-      if is_dir:
-        return False
-      
-      size_diff = l.info.get_size() != r.info.get_size()
-
-      if size_only:
-        time_diff = False
-      else:
-        time_l = l.info.get_modification_date_time()
-        time_r = r.info.get_modification_date_time()
-        assert(time_l)
-        assert(time_r)
-
-        time_diff = GLib.DateTime.compare(time_l, time_r) > 0
-        
-      return size_diff or time_diff
-    
-    leftfiles = set([f for f in left.values()])
-    rightfiles = set([f for f in right.values()])
-    
-    extra = leftfiles.difference(rightfiles)
-    self.extra = sorted_list(extra)
-    
-    self.missing = sorted_list(rightfiles.difference(leftfiles))
-
-    self.changed = set()
-    
-    # Most filesystems don't record useful information in directory metadata about whether a change has
-    # happened to a file inside the directory.
-    if not is_dir:
-      for l in leftfiles:
-        r = right.get(l.info.get_name())
-        if r and is_changed(l, r):
-          self.changed.add((l, r))
-
-    changed_left = { l[0] for l in self.changed }
-    same_files_left = sorted_list(leftfiles.difference(extra.union(changed_left)))
-    self.same = [(l, right[l.info.get_name()]) for l in same_files_left]
-
-  def dirty_is(self):
-    return self.extra or self.missing or self.changed
-
-  def describe(self):
-    lf = '\n'
-
-    def change_info(l, r):
-      infos = [f"size {l.info.get_size()} vs. {r.info.get_size()}"]
-
-      if l.info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_MODIFIED):
-        infos.append(f"time {GLib.DateTime.format_iso8601(l.info.get_modification_date_time())} vs {GLib.DateTime.format_iso8601(r.info.get_modification_date_time())}")
-
-      return ", ".join(infos)
-    
-    return f"""Extra:
-{lf.join([f.info.get_name() for f in self.extra])}
-Missing:
-{lf.join([f.info.get_name() for f in self.missing])}
-Changed:
-{lf.join([f"{l.info.get_name()} ({change_info(l, r)})" for l, r in self.changed])}
-Same:
-{lf.join([f"{l.info.get_name()} (size {str(l.info.get_size())})" for l, r in self.same])}
-    """
-
- 
 class ProgressData(TypedDict):
   time_previous: float
   time_start: float
   progress_shown: bool
 
   
-def decode_uri(f: Gio.File):
-  return urllib.parse.unquote(f)
-  
-def file_at(gfile: Gio.File, *paths: str):
-  """Construct a new Gio.File having the base URI of 'gfile', and path segments given by 'paths'."""
-  return Gio.File.new_for_uri(gfile.get_uri() + '/' + '/'.join([urllib.parse.quote(f) for f in paths]))
-
-def files_and_dirs_get(gfile: Gio.File, exclude: list[Gio.File], attrs_extra: set, case_insensitive_protect: bool) -> (
-    tuple[list[FileEntry], list[FileEntry]]
-):
-  """Get a list of metadata of directories and files at the given path.
-
-  If a path to a file is given, rather than a path to a directory, then just that single file will be returned
-  with an empty list of dirs.
-  
-  :params gfile: A path to a file or directory.
-  :params exclude: A list of paths that should be excluded from the results. Checked with Gio.File.equal.
-  :params case_insensitive_protect: Throws an error if two files having different cases are found.
-  :return: A tuple of FileEntry objects with content [directories, files].
-  """
-
-  attrs = ATTRS.union(attrs_extra)
-  
-  is_dir, gfile_info = test_dir(gfile, attrs)
-
-  if not is_dir:
-    return ([(gfile, gfile_info)], [])
-    
-  files: list[FileEntry] = []
-  dirs: list[FileEntry] = []
-
-  for f in gfile.enumerate_children(','.join(attrs), Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS):
-    child_file = file_at(gfile, f.get_name())
-    if any(child_file.equal(ex) for ex in exclude):
-      logging.info("Skipping file: %s", decode_uri(child_file.get_uri()))
-      continue
-
-    if f.get_file_type() == Gio.FileType.DIRECTORY:
-      dirs.append((child_file, f))
-    elif f.get_file_type() == Gio.FileType.REGULAR:
-      files.append((child_file, f))
-
-  if case_insensitive_protect:
-    fileset = {}
-    
-    for f, _ in files:
-      lower = f.get_basename().lower()
-      if lower in fileset:
-        fileset[lower].append(f)
-      else:
-        fileset[lower] = [f]
-
-    dupes = []
-    
-    for k, v in fileset.items():
-      if len(v) > 1:
-        dupes.extend(v)
-        
-    if dupes:
-      raise RuntimeError(
-        "Some files differ only by case. This will cause problems in the destination!\n\n" +
-        "Problem files: \n\n" + '\n'.join(f.get_uri() for f in dupes)
-      )
-      
-  return (files, dirs)
-
-def file_name_map(files: list[FileEntry]) -> FileNameToFileEntryComparable:
-  """Given a list of Gio.Files, returns a map of the files' names to the FileEntry objects."""
-  return { f[1].get_name(): FileEntryComparable(f) for f in files }
-
 def progress_file_copy_show(current_num_bytes, total_num_bytes, user_data: ProgressData):
   """Show the progress of copying a single file."""
   tv = time.time()
@@ -357,22 +174,11 @@ def progress_operation_show(num_dirs_remaining: int, num_files_done: int):
   """Print the known progress of the entire copy operation so far."""
   logging.info(f"Progress: {num_dirs_remaining} dirs remaining, synced {num_files_done} files")
 
-def test_dir(path: Gio.File, attrs: set = ATTRS) -> tuple[bool, Gio.FileInfo]:
-  """Return (is_dir, info) for the given path, where 'is_dir' is true if it's a directory.
+def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, case_insensitive_protect: bool,
+                 exclude_src: list[Matcher],
+                 exclude_dst: list[Matcher],
+                 exclude_matcher_finders: list[MatcherFinder]):
   
-  Raise GioSyncNotFound if the path is non-existent.
-  """
-  try:
-    info = path.query_info(','.join(attrs), Gio.FileQueryInfoFlags.NONE)
-  except GLib.GError as e:
-    if e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND):
-      raise GioSyncNotFound("Path not found", path.get_uri())
-    else:
-      raise
-
-  return info.get_file_type() == Gio.FileType.DIRECTORY, info
-  
-def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, case_insensitive_protect: bool):
   """Syncronize 'src' and 'dst' so that the files at 'dst' match the files at 'src' in content.
 
   Files and directories present in 'src' but missing from 'dst' will be copied.
@@ -383,7 +189,9 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
   :return: The number of files, but not directories, checked during the operation.
   """
 
-  stack = deque([(src, dst)])
+  stack: deque[tuple[Gio.File, Gio.File, list[Matcher], list[Matcher]]] \
+    = deque([(src, dst, exclude_src, exclude_dst)])
+  
   done = 0
   progress_last = time.time()
   dst_original = dst
@@ -391,7 +199,7 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
   attrs = set() if size_only else {Gio.FILE_ATTRIBUTE_TIME_MODIFIED, Gio.FILE_ATTRIBUTE_TIME_MODIFIED_USEC}
   
   while stack:
-    src, dst = stack.pop()
+    src, dst, exclude_src, exclude_dst = stack.pop()
 
     # Note that the original destination path needs to be excluded from syncing operations, to avoid infinite
     # recursion in case the dest directory is nested in the source.
@@ -399,7 +207,6 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
 
     try:
       dst_files, dst_dirs = files_and_dirs_get(dst, [], attrs, case_insensitive_protect)
-      dst_exists = True
     except GioSyncNotFound as e:
       dst_files = []
       dst_dirs = []
@@ -417,26 +224,57 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
       progress_operation_show(len(stack), done)
       progress_last = time.time()
     
-    src_diff_dirs = Diff(file_name_map(src_dirs), file_name_map(dst_dirs), True, size_only)
-    src_diff = Diff(file_name_map(src_files), file_name_map(dst_files), False, size_only)
+    # See if there are any more matchers that should be extracted from this set of files, such as looking for a
+    # '.gitignore' file.
+    #
+    # Note that any discovered Matchers will also be applied to subdirectories.
+    # This is the current behaviour but may change in future or per-Matcher.
+    def get_exclude_matchers_from_finders(entries: list[FileEntry], path: Gio.File):
+      result_with_none = [f.matcher_for_path(entries, path) for f in exclude_matcher_finders]
+      return [m for m in result_with_none if m]
+
+    new_src_matchers = get_exclude_matchers_from_finders(src_files, src)
+    if new_src_matchers:
+      logging.debug("Discovered a new set of exclusions: %s",
+                    ','.join([m.description for m in new_src_matchers]))
+      
+    exclude_final_src = exclude_src + new_src_matchers
+
+    # Note that 'src_files' is used as input here, as only .gitignore files (for example) on the source side are
+    # checked. However, a set of "right-side"/destination matchers should also be generated (with 'dst' as the base
+    # dir in that case) so that files can be properly excluded from the right according to these rules.
+    #
+    # The Matchers for both src and dst are basically created twice from the same set of files, but this is ok to keep
+    # the code complexity down.
+    exclude_final_dst = \
+      exclude_dst + get_exclude_matchers_from_finders(src_files, src)
+
+    src_diff_dirs = Diff(src_dirs, dst_dirs, True, size_only, exclude_final_src, exclude_final_dst)
+    src_diff = Diff(src_files, dst_files, False, size_only, exclude_final_src, exclude_final_dst)
 
     if any(diff.dirty_is() for diff in [src_diff_dirs, src_diff]):
-      logging.debug(f"Sync required at {decode_uri(dst.get_uri())}")
-      
-    if src_diff_dirs.dirty_is():
+      logging.debug("Sync required at %s", decode_uri(dst.get_uri()))
+
+    if src_diff_dirs.dirty_is() or src_diff_dirs.excluded_is:
+      logging.debug("Diff report for %s", decode_uri(dst.get_uri()))
+      logging.debug("Active exclusions:\n  %s", '\n  '.join(m.description for m in exclude_final_src))
       logging.debug(src_diff_dirs.describe() + "\n")
+
+    if src_diff_dirs.dirty_is():
       for extra in src_diff_dirs.extra:
         # A directory exists in 'src' that's not found in 'dst'.
         #
         # Place it on the top of the stack so it's processed first, before descending further into child
         # directories.
-        stack.append((extra.file, extra.file_at(dst)))
+        stack.append((extra.file, extra.file_at(dst), exclude_final_src, exclude_final_dst))
         
       for missing in src_diff_dirs.missing:
         delete_recurse(missing.entry, dry_run)
 
-    if src_diff.dirty_is():
+    if src_diff.dirty_is() or src_diff.excluded_is:
       logging.debug(src_diff.describe() + "\n")
+      
+    if src_diff.dirty_is():
       for extra in src_diff.extra:
         copy_file_to_dir(extra.file, dst, False, dry_run)
 
@@ -452,7 +290,7 @@ def sync_recurse(src: Gio.File, dst: Gio.File, dry_run: bool, size_only: bool, c
     # Now, add all the directories in common to the bottom of the stack, so that the above next iteration will
     # be processing the missing directories only. Finally, these additional directories will be processed in
     # alphabetical order because stack entries are popped off the top.
-    stack.extendleft((sd.file, dd.file) for sd, dd in src_diff_dirs.same)
+    stack.extendleft((sd.file, dd.file, exclude_final_src, exclude_final_dst) for sd, dd in src_diff_dirs.same)
 
     done += len(src_files)
   
@@ -485,10 +323,8 @@ def main():
   )
 
   parser.add_argument('src',
-                      type=str,
                       help="GVfs URI of source of sync operation. May point to a file or a directory.")
   parser.add_argument('dst',
-                      type=str,
                       nargs='?',
                       help="GVfs URI of destination directory of sync operation. " +
                            "If not given, then list source files to stdout.")
@@ -500,16 +336,27 @@ def main():
                       action='store_true',
                       help="Just describe what would be done, but don't make changes")
   parser.add_argument('--case-insensitive-protect',
-                      action='store_const',
-                      const=True,
-                      help="If one filesystem is case insensitive and the other is not, errors can occur during " +
-                           "file operations. This option will cause an error to be raised if a potential problem " +
+                      action='store_true',
+                      help="If one filesystem is case insensitive and the other is not, errors can occur during "
+                           "file operations. This option will cause an error to be raised if a potential problem "
                            "is found. MTP is protected by default.")
   parser.add_argument('--no-case-insensitive-protect',
-                      action='store_const',
-                      const=True,
-                      help="Ignores errors that can occur when trying to create two files having different cases " +
+                      action='store_true',
+                      help="Ignores errors that can occur when trying to create two files having different cases "
                            "on case insensitive file systems.")
+  parser.add_argument('--ignore',
+                      nargs='*',
+                      default=[],
+                      help="A '.gitignore' format ignore spec that's used to exclude files from syncing.")
+  parser.add_argument('--ignore-file',
+                      nargs='*',
+                      default=[],
+                      help="GVfs URI of a '.gitignore' file that's used to exclude files from syncing.")
+  parser.add_argument('--gitignore',
+                      action='store_true',
+                      help="If given, then any '.gitignore' files found in the synced source directories will be "
+                           "applied to files in that directory and its subdirectories."
+                      )
   parser.add_argument('--verbose', action='store_true')
 
   args = parser.parse_args()
@@ -518,7 +365,7 @@ def main():
     format='%(message)s',
     level=logging.DEBUG if args.verbose else logging.INFO
   )
-  
+
   src_path = Gio.File.new_for_commandline_arg(args.src)
 
   case_insensitive_schemes = ['mtp']
@@ -537,8 +384,31 @@ def main():
       )
 
     logging.info("Case insensitivity protection is %s", "on" if case_insensitive_protect else "off")
+
+    # Work out exclusion matchers
+    exclude_src = []
+    exclude_dst = []
     
-    total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only, case_insensitive_protect)
+    if args.ignore:
+      full_ignore_list = '\n'.join(args.ignore)
+      logging.info("Excluding files matching gitignore spec:\n  %s", '\n  '.join(full_ignore_list.split()))
+      exclude_src.append(MatcherGitignore.from_text(full_ignore_list, src_path))
+      exclude_dst.append(MatcherGitignore.from_text(full_ignore_list, dst_path))
+
+    for f in args.ignore_file:
+      logging.info("Excluding files matching gitignore spec in file '%s'", f)
+      exclude_src.append(MatcherGitignore.from_file(Gio.File.new_for_commandline_arg(f), src_path))
+      exclude_dst.append(MatcherGitignore.from_file(Gio.File.new_for_commandline_arg(f), dst_path))
+
+    exclude_finders: list[MatcherFinder] = []
+    
+    if args.gitignore:
+      logging.info("Excluding anything matched by any of the source paths' \".gitignore\" files")
+      exclude_finders.append(MatcherFinderGitignore())
+
+    # Run sync
+    total = sync_recurse(src_path, dst_path, args.dry_run, args.size_only, case_insensitive_protect,
+                         exclude_src, exclude_dst, exclude_finders)
     
     progress_operation_show(0, total)
     logging.info("Done")

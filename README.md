@@ -78,6 +78,36 @@ Download the `.whl` file from the most recent release at the [Github Releases pa
 
     gio-sync file:///home/user/Music "mtp:///MY_PHONE_ID_123345/SD Card/music_synced"
 	
+## "Ignore" files/exclusions
+
+Any "ignored" file won't be synced to the destination.
+
+Note that if a file or directory is ignored at the source, it is currently also ignored at the destination, meaning that ignored files that were previously synced will not be deleted or otherwise touched. You may need to manually clean up already-synced ignored destination files. Let me know if a change to this behaviour would be useful to you.
+
+There are three options for ignoring files and excluding them from the sync.
+
+### `--ignore` option
+
+This option allows you to specify one or more `.gitignore` specifications directly, according to the format described [here](https://git-scm.com/docs/gitignore). 
+
+Each ignored entry is concatenated into a single set of instructions in order, as if it had come from the lines of a single `.gitignore` file.
+
+Example:
+
+    gio-sync file:///home/user/Music "mtp:///MY_PHONE_ID_123345/SD Card/music_synced" --ignore '*.jpg' '*.png'
+
+### `--ignore-file` option
+
+This option allows you to specify a Gvfs URI (or plain file path) to one or more files that follow the `.gitignore` format. Example:
+
+    gio-sync file:///home/user/Music "mtp:///MY_PHONE_ID_123345/SD Card/music_synced" --ignore-file ~/backup/ignore-list.txt ~/backup/ignore-list-2.txt
+
+### `--gitignore` option
+
+When given, this option will parse any `.gitignore` files found in any of the synced source directories and exclude the files that match the specifications inside. Similarly to how Git operates, `.gitignore` files at one directory level apply to all directories beneath it, too.
+
+This option doesn't cover any other files such as `.git/info/exclude`. Please add those files via the `--ignore-file` option if you wish to use them, for now. Let me know if this option would be useful to you.
+
 # Further help
 
 Please run `gio-sync --help` for further information and additional commandline parameters.
