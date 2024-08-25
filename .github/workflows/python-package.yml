@@ -3,6 +3,7 @@ name: Python package
 on:
   push:
     branches: [ "master" ]
+    tags: [ "v*.*.*", "rc*.*.*" ]
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -47,7 +48,7 @@ jobs:
         
   release_if_tagged:
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/rc')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -68,8 +69,5 @@ jobs:
         --title ${{ github.ref_name }}
         --notes-file release-notes.md
         *.whl
-
-      # Should be filled in by Github.
-      # See https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#about-the-github_token-secret
-      #env:
-      #  GITHUB_TOKEN: ${{ secrets.github }}
+      env:
+        GH_TOKEN: ${{ github.token }}
